@@ -5,11 +5,9 @@ from io import BytesIO
 import pandas as pd
 import pymorphy3
 import streamlit as st
+from openpyxl.utils import get_column_letter
 
-# st.set_page_config should be called before other Streamlit commands.
 st.set_page_config(page_title="Агрегация слов по леммам", layout="wide")
-
-morph = pymorphy3.MorphAnalyzer(lang="ru")
 
 DEFAULT_STOP_WORDS = {
     "в", "на", "и", "с", "по", "для", "из", "от", "до", "у", "о", "об", "под", "над"
@@ -17,7 +15,7 @@ DEFAULT_STOP_WORDS = {
 
 
 @st.cache_resource
-def get_morph_analyzer() -> pymorphy3.MorphAnalyzer:
+def get_morph_analyzer():
     return pymorphy3.MorphAnalyzer(lang="ru")
 
 
@@ -66,7 +64,7 @@ def aggregate_by_lemma_from_df(
         words = extract_words(row["Ключ"])
 
         if count_once_per_key:
-            lemmas_in_key: dict[str, set[str]] = {}
+            lemmas_in_key = {}
             for word in words:
                 lemma = normalize_word(word)
                 if lemma not in stop_words:
@@ -108,19 +106,40 @@ def aggregate_by_lemma_from_df(
 
 def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = BytesIO()
+
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Результат")
+        export_df = df.copy()
+        export_df.to_excel(writer, index=False, sheet_name="Результат")
 
-        worksheet = writer.sheets["Результат"]
-        for idx, col in enumerate(df.columns, start=1):
-            max_len = max(df[col].astype(str).map(len).max(), len(col)) if not df.empty else len(col)
-            worksheet.column_dimensions[chr(64 + idx)].width = min(max_len + 2, 60)
+        ws = writer.sheets["Результат"]
 
+        for idx, col_name in enumerate(export_df.columns, start=1):
+            col_letter = get_column_letter(idx)
+            header_len = len(str(col_name))
+
+            if export_df.empty:
+                max_len = header_len
+            else:
+                series = export_df.iloc[:, idx - 1]
+                cell_len = series.map(lambda x: len(str(x)) if pd.notna(x) else 0).max()
+                max_len = max(header_len, int(cell_len))
+
+            ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
+
+        for row in range(2, len(export_df) + 2):
+            ws[f"B{row}"].number_format = "#,##0.00"
+            ws[f"C{row}"].number_format = "#,##0.00"
+            ws[f"D{row}"].number_format = "0.00"
+
+    output.seek(0)
     return output.getvalue()
 
 
 st.title("Агрегация слов по леммам")
-st.write("Загрузи Excel-файл с колонками **Ключ**, **Расход**, **Доход**. Приложение объединит словоформы: например, *Москва* и *Москве*.")
+st.write(
+    "Загрузи Excel-файл с колонками **Ключ**, **Расход**, **Доход**. "
+    "Приложение объединит словоформы: например, **Москва** и **Москве**."
+)
 
 with st.sidebar:
     st.header("Настройки")
@@ -138,13 +157,16 @@ uploaded_file = st.file_uploader("Выбери Excel-файл", type=["xlsx"])
 if uploaded_file is not None:
     try:
         source_df = pd.read_excel(uploaded_file)
+
         st.subheader("Предпросмотр исходных данных")
         st.dataframe(source_df.head(10), use_container_width=True)
 
         if st.button("Обработать файл", type="primary"):
             stop_words = set(DEFAULT_STOP_WORDS) if remove_stop_words else set()
             if custom_stop_words.strip():
-                stop_words.update({w.strip().lower() for w in custom_stop_words.split(",") if w.strip()})
+                stop_words.update(
+                    {w.strip().lower() for w in custom_stop_words.split(",") if w.strip()}
+                )
 
             result_df = aggregate_by_lemma_from_df(
                 source_df,
@@ -159,12 +181,14 @@ if uploaded_file is not None:
                 st.dataframe(result_df, use_container_width=True)
 
                 excel_bytes = dataframe_to_excel_bytes(result_df)
+
                 st.download_button(
                     label="Скачать результат в Excel",
                     data=excel_bytes,
                     file_name="output_lemmas.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
+
     except Exception as e:
         st.error(f"Ошибка: {e}")
 else:
